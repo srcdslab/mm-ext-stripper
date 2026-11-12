@@ -23,23 +23,29 @@ typedef void *		HINSTANCE;
 inline bool IsPathSepChar(char c) { return (c == '/'); }
 #endif
 
-#define MMS_1_4_EP1_FILE		"stripper.14.ep1" PLATFORM_EXT
-#define MMS_1_6_EP1_FILE		"stripper.16.ep1" PLATFORM_EXT
-#define MMS_1_6_EP2_FILE		"stripper.16.ep2" PLATFORM_EXT
-#define MMS_1_6_TF2_FILE		"stripper.16.tf2" PLATFORM_EXT
-#define MMS_1_6_DODS_FILE		"stripper.16.dods" PLATFORM_EXT
-#define MMS_1_6_HL2DM_FILE		"stripper.16.hl2dm" PLATFORM_EXT
-#define MMS_1_6_ND_FILE			"stripper.16.nd" PLATFORM_EXT
-#define MMS_1_6_L4D_FILE		"stripper.16.l4d" PLATFORM_EXT
-#define MMS_1_6_L4D2_FILE		"stripper.16.l4d2" PLATFORM_EXT
-#define MMS_1_6_DARKM_FILE		"stripper.16.darkm" PLATFORM_EXT
-#define MMS_1_6_SWARM_FILE		"stripper.16.swarm" PLATFORM_EXT
-#define MMS_1_6_BGT_FILE		"stripper.16.bgt" PLATFORM_EXT
-#define MMS_1_6_CSGO_FILE		"stripper.16.csgo" PLATFORM_EXT
-#define MMS_1_6_CSS_FILE		"stripper.16.css" PLATFORM_EXT
-#define MMS_1_6_INS_FILE		"stripper.16.ins" PLATFORM_EXT
-#define MMS_1_6_SDK2013_FILE	"stripper.16.sdk2013" PLATFORM_EXT
-#define MMS_1_6_BMS_FILE		"stripper.16.bms" PLATFORM_EXT
+#define MMS_1_6_EP1_FILE		"stripper.2.ep1" PLATFORM_EXT
+#define MMS_1_6_EP2_FILE		"stripper.2.ep2" PLATFORM_EXT
+#define MMS_1_6_TF2_FILE		"stripper.2.tf2" PLATFORM_EXT
+#define MMS_1_6_DODS_FILE		"stripper.2.dods" PLATFORM_EXT
+#define MMS_1_6_HL2DM_FILE		"stripper.2.hl2dm" PLATFORM_EXT
+#define MMS_1_6_ND_FILE			"stripper.2.nd" PLATFORM_EXT
+#define MMS_1_6_L4D_FILE		"stripper.2.l4d" PLATFORM_EXT
+#define MMS_1_6_L4D2_FILE		"stripper.2.l4d2" PLATFORM_EXT
+#define MMS_1_6_DARKM_FILE		"stripper.2.darkm" PLATFORM_EXT
+#define MMS_1_6_SWARM_FILE		"stripper.2.swarm" PLATFORM_EXT
+#define MMS_1_6_BGT_FILE		"stripper.2.bgt" PLATFORM_EXT
+#define MMS_1_6_CSGO_FILE		"stripper.2.csgo" PLATFORM_EXT
+#define MMS_1_6_CSS_FILE		"stripper.2.css" PLATFORM_EXT
+#define MMS_1_6_INS_FILE		"stripper.2.ins" PLATFORM_EXT
+#define MMS_1_6_SDK2013_FILE	"stripper.2.sdk2013" PLATFORM_EXT
+#define MMS_1_6_BMS_FILE		"stripper.2.bms" PLATFORM_EXT
+#define MMS_1_6_DOI_FILE		"stripper.2.doi" PLATFORM_EXT
+#define MMS_1_6_PVKII_FILE		"stripper.2.pvkii" PLATFORM_EXT
+#define MMS_1_6_BLADE_FILE		"stripper.2.blade" PLATFORM_EXT
+#define MMS_1_6_MCV_FILE		"stripper.2.mcv" PLATFORM_EXT
+#define MMS_1_6_PORTAL2_FILE	"stripper.2.portal2" PLATFORM_EXT
+#define MMS_1_6_CONTAGION_FILE	"stripper.2.contagion" PLATFORM_EXT
+#define MMS_1_6_EYE_FILE		"stripper.2.eye" PLATFORM_EXT
 
 HINSTANCE stripper_library = NULL;
 
@@ -135,6 +141,31 @@ EXPORT METAMOD_PLUGIN *CreateInterface_MMS(const MetamodVersionInfo *mvi, const 
 		case SOURCE_ENGINE_HL2DM:
 			file = MMS_1_6_HL2DM_FILE;
 			break;
+		case SOURCE_ENGINE_ORANGEBOXVALVE_DEPRECATED:
+			{
+				const char *gamedir = mvi->GetGameDir();
+				if (strcmp(gamedir, "tf") == 0)
+				{
+					file = MMS_1_6_TF2_FILE;
+				}
+				else if (strcmp(gamedir, "dod") == 0)
+				{
+					file = MMS_1_6_DODS_FILE;
+				}
+				else if (strcmp(gamedir, "hl2mp") == 0)
+				{
+					file = MMS_1_6_HL2DM_FILE;
+				}
+				else if (strcmp(gamedir, "cstrike") == 0)
+				{
+					file = MMS_1_6_CSS_FILE;
+				}
+				else
+				{
+					file = MMS_1_6_EP2_FILE;
+				}
+				break;
+			}
 		case SOURCE_ENGINE_NUCLEARDAWN:
 			file = MMS_1_6_ND_FILE;
 			break;
@@ -146,8 +177,18 @@ EXPORT METAMOD_PLUGIN *CreateInterface_MMS(const MetamodVersionInfo *mvi, const 
 			file = MMS_1_6_L4D_FILE;
 			break;
 		case SOURCE_ENGINE_LEFT4DEAD2:
-			file = MMS_1_6_L4D2_FILE;
-			break;
+			{
+				const char *gamedir = mvi->GetGameDir();
+				if (strcmp(gamedir, "nucleardawn") == 0)
+				{
+					file = MMS_1_6_ND_FILE;
+				}
+				else
+				{
+					file = MMS_1_6_L4D2_FILE;
+				}
+				break;
+			}
 		case SOURCE_ENGINE_DARKMESSIAH:
 			file = MMS_1_6_DARKM_FILE;
 			break;
@@ -172,10 +213,35 @@ EXPORT METAMOD_PLUGIN *CreateInterface_MMS(const MetamodVersionInfo *mvi, const 
 		case SOURCE_ENGINE_BMS:
 			file = MMS_1_6_BMS_FILE;
 			break;
+		case SOURCE_ENGINE_DOI:
+			file = MMS_1_6_DOI_FILE;
+			break;
+		case SOURCE_ENGINE_PVKII:
+			file = MMS_1_6_PVKII_FILE;
+			break;
+		case SOURCE_ENGINE_BLADE:
+			file = MMS_1_6_BLADE_FILE;
+			break;
+		case SOURCE_ENGINE_MCV:
+			file = MMS_1_6_MCV_FILE;
+			break;
+		case SOURCE_ENGINE_PORTAL2:
+			file = MMS_1_6_PORTAL2_FILE;
+			break;
+		case SOURCE_ENGINE_CONTAGION:
+			file = MMS_1_6_CONTAGION_FILE;
+			break;
+		case SOURCE_ENGINE_EYE:
+			file = MMS_1_6_EYE_FILE;
+			break;
 	}
 
 	char our_path[256];
+#if defined PLATFORM_64BITS
+	UTIL_Format(our_path, sizeof(our_path), "%s" PATH_SEP_CHAR "%s" PATH_SEP_CHAR "%s", mli->pl_path, "x64", file);
+#else
 	UTIL_Format(our_path, sizeof(our_path), "%s" PATH_SEP_CHAR "%s", mli->pl_path, file);
+#endif
 
 	return TryAndLoadLibrary(our_path);
 }
@@ -187,36 +253,6 @@ EXPORT void UnloadInterface_MMS()
 		FreeLibrary(stripper_library);
 		stripper_library = NULL;
 	}
-}
-
-EXPORT void *CreateInterface(const char *pName, int *pReturnCode)
-{
-	if (strcmp(pName, METAMOD_PLAPI_NAME) == 0)
-	{
-		char our_file[256];
-		if (!GetFileOfAddress((void *)CreateInterface_MMS, our_file, sizeof(our_file)))
-		{
-			return NULL;
-		}
-
-		/* Go backwards and get the first token */
-		size_t len = strlen(our_file);
-		for (size_t i = len; i-- > 0;)
-		{
-			if (IsPathSepChar(our_file[i]))
-			{
-				our_file[i] = '\0';
-				break;
-			}
-		}
-
-		char new_file[256];
-		UTIL_Format(new_file, sizeof(new_file), "%s" PATH_SEP_CHAR MMS_1_4_EP1_FILE, our_file);
-
-		return TryAndLoadLibrary(new_file);
-	}
-
-	return NULL;
 }
 
 #if defined _MSC_VER

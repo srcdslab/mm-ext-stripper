@@ -1,5 +1,5 @@
 /** vim: set ts=4 sw=4 et tw=99:
- * 
+ *
  * === Stripper for Metamod:Source ===
  * Copyright (C) 2005-2009 David "BAILOPAN" Anderson
  * No warranties of any kind.
@@ -17,11 +17,16 @@
 #define vsnprintf _vsnprintf
 #endif
 #include "stripper_mm.h"
+#if METAMOD_PLAPI_VERSION >= 18
+#include <khook.hpp>
+#endif
 #include "intercom.h"
 #include "icommandline.h"
 #include <stripper_version_auto.h>
 
+#if METAMOD_PLAPI_VERSION < 18
 using namespace SourceHook;
+#endif
 
 StripperPlugin g_Plugin;
 
@@ -30,15 +35,21 @@ PLUGIN_EXPOSE(StripperPlugin, g_Plugin);
 static IVEngineServer *engine = NULL;
 static IServerGameDLL *server = NULL;
 static IServerGameClients* clients = NULL;
-static SourceHook::String g_mapname;
+static bool disable_jit = false;
+static std::string g_mapname;
 static stripper_core_t stripper_core;
 static char game_path[256];
 static char stripper_path[256];
 static char stripper_cfg_path[256];
 
+#if METAMOD_PLAPI_VERSION < 18
 SH_DECL_HOOK0(IVEngineServer, GetMapEntitiesString, SH_NOATTRIB, 0, const char *);
 SH_DECL_HOOK6(IServerGameDLL, LevelInit, SH_NOATTRIB, 0, bool, char const *, char const *, char const *, char const *, bool, bool);
 SH_DECL_HOOK1_void(IServerGameClients, SetCommandClient, SH_NOATTRIB, 0, int);
+#else
+static KHook::Virtual<IVEngineServer, const char *> g_HookGetMapEntitiesString(&IVEngineServer::GetMapEntitiesString, GetMapEntitiesString_handler, nullptr);
+static KHook::Virtual<IServerGameDLL, bool, char const *, char const *, char const *, char const *, bool, bool> g_HookLevelInit(&IServerGameDLL::LevelInit, LevelInit_handler, nullptr);
+#endif
 
 #if !defined ORANGEBOX_BUILD
 ICvar* g_pCVar = NULL;
@@ -48,8 +59,7 @@ ICvar*
 GetICVar()
 {
 #if defined METAMOD_PLAPI_VERSION
-#if SOURCE_ENGINE==SE_ORANGEBOX || SOURCE_ENGINE==SE_LEFT4DEAD || SOURCE_ENGINE==SE_LEFT4DEAD2 || SOURCE_ENGINE==SE_TF2 || SOURCE_ENGINE==SE_DODS || SOURCE_ENGINE==SE_HL2DM || SOURCE_ENGINE==SE_NUCLEARDAWN || \
-    SOURCE_ENGINE==SE_ALIENSWARM || SOURCE_ENGINE==SE_BLOODYGOODTIME || SOURCE_ENGINE==SE_CSGO || SOURCE_ENGINE==SE_CSS || SOURCE_ENGINE==SE_INSURGENCY || SOURCE_ENGINE==SE_SDK2013 || SOURCE_ENGINE== SE_BMS
+#if SOURCE_ENGINE >= SE_ORANGEBOX
     return (ICvar *)((g_SMAPI->GetEngineFactory())(CVAR_INTERFACE_VERSION, NULL));
 #else
     return (ICvar *)((g_SMAPI->GetEngineFactory())(VENGINE_CVAR_INTERFACE_VERSION, NULL));
@@ -70,8 +80,13 @@ typedef void *			LibraryHandle;
 
 static LibraryHandle stripper_lib;
 
+#if METAMOD_PLAPI_VERSION < 18
 static void
 SetCommandClient(int client);
+#else
+static KHook::Return<void> SetCommandClient(IServerGameClients *pClients, int client);
+static KHook::Virtual<IServerGameClients, void, int> g_HookSetCommandClient(&IServerGameClients::SetCommandClient, SetCommandClient, nullptr);
+#endif
 
 static void
 log_message(const char* fmt, ...)
@@ -103,10 +118,37 @@ path_format(char* buffer, size_t maxlength, const char* fmt, ...)
     g_SMAPI->PathFormat(buffer, maxlength, "%s", new_buffer);
 }
 
-static const char*
-get_map_name()
+void
+get_map_display_name(const char* mapName, char* mapDisplay, size_t maxlen)
 {
-    return STRING(g_SMAPI->GetCGlobals()->mapname);
+    // Just copy the string, at least for TF2 the map name will always be
+    // something that looks like this even when the entry in mapcycle
+    // doesn't have the map name
+    // workshop/ctf_convoy_v2.ugc483740681
+
+    snprintf(mapDisplay, maxlen, "%s", mapName);
+
+    // See CHalfLife2::GetMapDisplayName in SM
+    char* pos;
+    if ((pos = strrchr(mapDisplay, '/')) != NULL || (pos = strrchr(mapDisplay, '\\')) != NULL)
+    {
+        snprintf(mapDisplay, maxlen, "%s", &pos[1]);
+    }
+
+    if ((pos = strstr(mapDisplay, ".ugc")) != NULL)
+    {
+        pos[0] = '\0';
+    }
+}
+
+void get_map_name(char* buffer, size_t maxlen)
+{
+    get_map_display_name(STRING(g_SMAPI->GetCGlobals()->mapname), buffer, maxlen);
+}
+
+bool should_disable_jit()
+{
+    return disable_jit;
 }
 
 static stripper_game_t stripper_game =
@@ -117,6 +159,7 @@ static stripper_game_t stripper_game =
     log_message,
     path_format,
     get_map_name,
+    should_disable_jit
 };
 
 ConVar cvar_stripper_cfg_path("stripper_cfg_path", "addons/stripper", FCVAR_NONE, "Stripper Config Path");
@@ -126,6 +169,8 @@ ConVar stripper_curfile("stripper_current_file", "", FCVAR_SPONLY | FCVAR_NOTIFY
 ConVar stripper_nextfile("stripper_next_file", "", FCVAR_PROTECTED | FCVAR_SPONLY, "Stripper for next map");
 
 ConVar stripper_lowercase("stripper_file_lowercase", "0", FCVAR_NONE, "Load stripper configs in lowercase");
+
+ConVar stripper_jit_disable("stripper_jit_disable", "0", FCVAR_NONE, "Disable JIT compilation for Regex patterns in Stripper (set via command line)");
 
 #if SOURCE_ENGINE >= SE_ORANGEBOX
 void stripper_cfg_path_changed(IConVar *var, const char *pOldValue, float flOldValue)
@@ -144,27 +189,27 @@ StripperPlugin::Load(PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, boo
 
 #if defined METAMOD_PLAPI_VERSION
     GET_V_IFACE_ANY(GetServerFactory, server, IServerGameDLL, INTERFACEVERSION_SERVERGAMEDLL);
-#if SOURCE_ENGINE == SE_TF2 || SOURCE_ENGINE == SE_CSS || SOURCE_ENGINE == SE_DODS || SOURCE_ENGINE == SE_HL2DM || SOURCE_ENGINE == SE_SDK2013 || SOURCE_ENGINE == SE_BMS
-	// Shim to avoid hooking shims
-	engine = (IVEngineServer *)ismm->GetEngineFactory()("VEngineServer023", nullptr);
-	if (!engine)
-	{
-		engine = (IVEngineServer *)ismm->GetEngineFactory()("VEngineServer022", nullptr);
-		if (!engine)
-		{
-			engine = (IVEngineServer *)ismm->GetEngineFactory()("VEngineServer021", nullptr);
-			if (!engine)
-			{
-				if (error && maxlen)
-				{
-					ismm->Format(error, maxlen, "Could not find interface: VEngineServer023 or VEngineServer022 or VEngineServer021");
-				}
-				return false;
-			}
-		}
-	}
+#if SOURCE_ENGINE == SE_SDK2013
+    // Shim to avoid hooking shims
+    engine = (IVEngineServer *)ismm->GetEngineFactory()("VEngineServer023", nullptr);
+    if (!engine)
+    {
+        engine = (IVEngineServer *)ismm->GetEngineFactory()("VEngineServer022", nullptr);
+        if (!engine)
+        {
+            engine = (IVEngineServer *)ismm->GetEngineFactory()("VEngineServer021", nullptr);
+            if (!engine)
+            {
+                if (error && maxlen)
+                {
+                    ismm->Format(error, maxlen, "Could not find interface: VEngineServer023 or VEngineServer022 or VEngineServer021");
+                }
+                return false;
+            }
+        }
+    }
 #else
-	GET_V_IFACE_CURRENT(GetEngineFactory, engine, IVEngineServer, INTERFACEVERSION_VENGINESERVER);
+    GET_V_IFACE_CURRENT(GetEngineFactory, engine, IVEngineServer, INTERFACEVERSION_VENGINESERVER);
 #endif
     GET_V_IFACE_ANY(GetServerFactory, clients, IServerGameClients, INTERFACEVERSION_SERVERGAMECLIENTS);
 #else
@@ -182,8 +227,8 @@ StripperPlugin::Load(PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, boo
     cvar_stripper_cfg_path.InstallChangeCallback( stripper_cfg_path_changed );
 
 #if SOURCE_ENGINE==SE_DARKMESSIAH
-	ICvar* cvar = GetICVar();
-	const char* temp = (cvar == NULL) ? NULL : cvar->GetCommandLineValue("+stripper_path");
+    ICvar* cvar = GetICVar();
+    const char* temp = (cvar == NULL) ? NULL : cvar->GetCommandLineValue("+stripper_path");
 #else
     const char* temp = CommandLine()->ParmValue("+stripper_path");
 #endif
@@ -191,6 +236,16 @@ StripperPlugin::Load(PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, boo
     {
         g_SMAPI->PathFormat(stripper_path, sizeof(stripper_path), "%s", temp);
         stripper_game.stripper_path = stripper_path;
+    }
+
+#if SOURCE_ENGINE==SE_DARKMESSIAH
+    const char* jit_disable_value = (cvar == NULL) ? NULL : cvar->GetCommandLineValue("+stripper_jit_disable");
+#else
+    const char* jit_disable_value = CommandLine()->ParmValue("+stripper_jit_disable");
+#endif
+    if (jit_disable_value != NULL && jit_disable_value[0] != '\0')
+    {
+        disable_jit = strcmp(jit_disable_value, "1") == 0;
     }
 
 #if defined __linux__
@@ -201,12 +256,21 @@ StripperPlugin::Load(PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, boo
 #define PLATFORM_EXT    ".dll"
 #endif
 
+#if !defined PLATFORM_64BITS
     char path[256];
     g_SMAPI->PathFormat(path,
             sizeof(path),
             "%s/%s/bin/stripper.core" PLATFORM_EXT,
             game_path,
             stripper_game.stripper_path);
+#else
+    char path[256];
+    g_SMAPI->PathFormat(path,
+            sizeof(path),
+            "%s/%s/bin/x64/stripper.core" PLATFORM_EXT,
+            game_path,
+            stripper_game.stripper_path);
+#endif
 
 #undef PLATFORM_EXT
 
@@ -245,12 +309,17 @@ StripperPlugin::Load(PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, boo
 
     stripper_load(&stripper_game, &stripper_core);
 
+#if METAMOD_PLAPI_VERSION < 18
     SH_ADD_HOOK_STATICFUNC(IVEngineServer, GetMapEntitiesString, engine, GetMapEntitiesString_handler, false);
     SH_ADD_HOOK_STATICFUNC(IServerGameDLL, LevelInit, server, LevelInit_handler, false);
     SH_ADD_HOOK_STATICFUNC(IServerGameClients, SetCommandClient, clients, SetCommandClient, false);
+#else
+    g_HookGetMapEntitiesString.Add(engine);
+    g_HookLevelInit.Add(server);
+    g_HookSetCommandClient.Add(clients);
+#endif
 
-#if SOURCE_ENGINE==SE_ORANGEBOX || SOURCE_ENGINE==SE_LEFT4DEAD || SOURCE_ENGINE==SE_LEFT4DEAD2 || SOURCE_ENGINE==SE_TF2 || SOURCE_ENGINE==SE_DODS || SOURCE_ENGINE==SE_HL2DM || SOURCE_ENGINE==SE_NUCLEARDAWN || \
-    SOURCE_ENGINE==SE_ALIENSWARM || SOURCE_ENGINE==SE_BLOODYGOODTIME || SOURCE_ENGINE==SE_CSGO || SOURCE_ENGINE==SE_CSS || SOURCE_ENGINE==SE_INSURGENCY || SOURCE_ENGINE==SE_SDK2013 || SOURCE_ENGINE== SE_BMS
+#if SOURCE_ENGINE >= SE_ORANGEBOX
     g_pCVar = GetICVar();
     ConVar_Register(0, this);
 #else
@@ -263,9 +332,15 @@ StripperPlugin::Load(PluginId id, ISmmAPI *ismm, char *error, size_t maxlen, boo
 bool
 StripperPlugin::Unload(char *error, size_t maxlen)
 {
+#if METAMOD_PLAPI_VERSION < 18
     SH_REMOVE_HOOK_STATICFUNC(IVEngineServer, GetMapEntitiesString, engine, GetMapEntitiesString_handler, false);
     SH_REMOVE_HOOK_STATICFUNC(IServerGameDLL, LevelInit, server, LevelInit_handler, false);
     SH_REMOVE_HOOK_STATICFUNC(IServerGameClients, SetCommandClient, clients, SetCommandClient, false);
+#else
+    g_HookGetMapEntitiesString.Remove(engine);
+    g_HookLevelInit.Remove(server);
+    g_HookSetCommandClient.Remove(clients);
+#endif
     stripper_core.unload();
     dlclose(stripper_lib);
     stripper_lib = NULL;
@@ -273,47 +348,68 @@ StripperPlugin::Unload(char *error, size_t maxlen)
     return true;
 }
 
+#if METAMOD_PLAPI_VERSION < 18
 const char*
 GetMapEntitiesString_handler()
+#else
+KHook::Return<const char *>
+GetMapEntitiesString_handler(IVEngineServer *pEngine)
+#endif
 {
+#if METAMOD_PLAPI_VERSION < 18
     RETURN_META_VALUE(MRES_SUPERCEDE, stripper_core.ent_string());
+#else
+    return { KHook::Action::Supersede, stripper_core.ent_string() };
+#endif
 }
 
+#if METAMOD_PLAPI_VERSION < 18
 bool
 LevelInit_handler(char const *pMapName, char const *pMapEntities, char const *c, char const *d, bool e, bool f)
+#else
+KHook::Return<bool>
+LevelInit_handler(IServerGameDLL *pServer, char const *pMapName, char const *pMapEntities, char const *c, char const *d, bool e, bool f)
+#endif
 {
+    char mapDisplay[128];
+    get_map_display_name(pMapName, mapDisplay, sizeof(mapDisplay));
     if (strlen(stripper_nextfile.GetString()) > 0) {
         g_mapname.assign(stripper_nextfile.GetString());
-        log_message("Loading %s for map \"%s\"", g_mapname.c_str(), pMapName);
+        log_message("Loading %s for map \"%s\"", g_mapname.c_str(), mapDisplay);
     } else if (stripper_lowercase.GetInt()) {
-        char* name = UTIL_ToLowerCase(pMapName);
+        char* name = UTIL_ToLowerCase(mapDisplay);
         g_mapname.assign(name);
         delete[] name;
     } else {
-        g_mapname.assign(pMapName);
+        g_mapname.assign(mapDisplay);
     }
 
     stripper_nextfile.SetValue("");
     stripper_curfile.SetValue(g_mapname.c_str());
 
     const char *ents = stripper_core.parse_map(g_mapname.c_str(), pMapEntities);
+#if METAMOD_PLAPI_VERSION < 18
     RETURN_META_VALUE_NEWPARAMS(MRES_IGNORED, true, &IServerGameDLL::LevelInit, (pMapName, ents, c, d, e, f));
+#else
+    bool ret = g_HookLevelInit.CallOriginal(pServer, pMapName, ents, c, d, e, f);
+    return { KHook::Action::Supersede, ret };
+#endif
 }
 
 char*
 UTIL_ToLowerCase(const char *str)
 {
-	size_t len = strlen(str);
-	char *buffer = new char[len + 1];
-	for (size_t i = 0; i < len; i++)
-	{
-		if (str[i] >= 'A' && str[i] <= 'Z')
-			buffer[i] = str[i] - ('A' - 'a');
-		else
-			buffer[i] = str[i];
-	}
-	buffer[len] = '\0';
-	return buffer;
+    size_t len = strlen(str);
+    char *buffer = new char[len + 1];
+    for (size_t i = 0; i < len; i++)
+    {
+        if (str[i] >= 'A' && str[i] <= 'Z')
+            buffer[i] = str[i] - ('A' - 'a');
+        else
+            buffer[i] = str[i];
+    }
+    buffer[len] = '\0';
+    return buffer;
 }
 
 bool
@@ -389,10 +485,20 @@ StripperPlugin::RegisterConCommandBase(ConCommandBase *pVar)
 
 static int last_command_client = 1;
 
+#if METAMOD_PLAPI_VERSION < 18
 static void
 SetCommandClient(int client)
+#else
+static KHook::Return<void>
+SetCommandClient(IServerGameClients *pClients, int client)
+#endif
 {
     last_command_client = client;
+#if METAMOD_PLAPI_VERSION < 18
+    RETURN_META(MRES_IGNORED);
+#else
+    return { KHook::Action::Ignore };
+#endif
 }
 
 ConVar stripper_version("stripper_version", STRIPPER_FULL_VERSION, FCVAR_SPONLY | FCVAR_NOTIFY, "Stripper Version");

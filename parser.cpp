@@ -1,5 +1,5 @@
 /** vim: set ts=4 sw=4 et tw=99:
- * 
+ *
  * === Stripper for Metamod:Source ===
  * Copyright (C) 2005-2009 David "BAILOPAN" Anderson
  * No warranties of any kind.
@@ -9,14 +9,56 @@
  * ===================================
  */
 
-#include "pcre.h"
-#include <sh_stack.h>
+#include <stack>
 #include <ctype.h>
+#include <assert.h>
+#include <string.h>
+#if !defined(_WIN32)
+#include <strings.h>
+#endif
 #include "parser.h"
-#include <sh_string.h>
+#include <string>
 #include "support.h"
 
-using namespace SourceHook;
+
+static bool MatchRegex(pcre2_code *code,
+                       pcre2_match_data *match_data,
+                       const char *subject,
+                       size_t subject_length,
+                       int *ovector)
+{
+    if (!code || !match_data)
+    {
+        return false;
+    }
+
+    int rc = pcre2_match(code,
+                         (PCRE2_SPTR)subject,
+                         (PCRE2_SIZE)subject_length,
+                         0,
+                         0,
+                         match_data,
+                         NULL);
+    if (rc < 0)
+    {
+        return false;
+    }
+
+    PCRE2_SIZE *matches = pcre2_get_ovector_pointer(match_data);
+    uint32_t match_count = pcre2_get_ovector_count(match_data);
+    uint32_t offset_count = match_count * 2;
+    if (offset_count > 30)
+    {
+        offset_count = 30;
+    }
+
+    for (uint32_t i = 0; i < offset_count; i++)
+    {
+        ovector[i] = matches[i] == PCRE2_UNSET ? -1 : (int)matches[i];
+    }
+
+    return true;
+}
 
 void f_strncpy_s(char *dest, const char *str, size_t n)
 {
@@ -77,12 +119,18 @@ void UTIL_TrimRight(char *buffer)
 Stripper::Stripper()
 {
     m_resync = false;
+    jit_compiled = false;
 
-    const char *pattern = "\"([^\"]+)\"\\s+\"([^\"]+)\"";
-    const char *error;
-    int err_no;
-    brk_re = pcre_compile(pattern, 0, &error, &err_no, NULL);
-    brk_re_extra = pcre_study(brk_re, 0, &error);
+    static constexpr char pattern[] = "\"([^\"]+)\"\\s+\"([^\"]+)\"";
+    int error_code;
+    PCRE2_SIZE error_offset;
+    brk_re = pcre2_compile((PCRE2_SPTR)pattern,
+                           PCRE2_ZERO_TERMINATED,
+                           0,
+                           &error_code,
+                           &error_offset,
+                           NULL);
+    brk_match_data = brk_re ? pcre2_match_data_create_from_pattern(brk_re, NULL) : NULL;
     m_tostring = NULL;
     m_tostring_len = 0;
     m_tostring_maxlen = 0;
@@ -90,35 +138,71 @@ Stripper::Stripper()
 
 Stripper::~Stripper()
 {
+    jit_compiled = false;
     Clear();
+
+    if (brk_match_data)
+    {
+        pcre2_match_data_free(brk_match_data);
+    }
+    if (brk_re)
+    {
+        pcre2_code_free(brk_re);
+    }
 
     while (!m_StringCache.empty())
     {
-        delete m_StringCache.front();
+        delete m_StringCache.top();
         m_StringCache.pop();
     }
     while (!m_PropCache.empty())
     {
-        delete m_PropCache.front();
+        delete m_PropCache.top();
         m_PropCache.pop();
     }
-    
+
     free(m_tostring);
 }
 
-SourceHook::String *Stripper::AllocString()
+bool Stripper::JITCompile()
+{
+    if (!brk_re || jit_compiled)
+    {
+        return false;
+    }
+    if (pcre2_jit_compile(NULL, PCRE2_JIT_TEST_ALLOC) == 0)
+    {
+        int jit_error = pcre2_jit_compile(brk_re, PCRE2_JIT_COMPLETE);
+        if (jit_error != 0)
+        {
+            char jit_error_msg[256];
+            if (pcre2_get_error_message(jit_error, (PCRE2_UCHAR8 *)jit_error_msg, sizeof(jit_error_msg)) < 0)
+            {
+                snprintf(jit_error_msg, sizeof(jit_error_msg), "Unknown PCRE JIT error");
+            }
+            stripper_game.log_message("Cannot request JIT compilation from PCRE, error: %s", jit_error_msg);
+            return false;
+        }
+        jit_compiled = true;
+        return true;
+    }
+
+    return false;
+}
+
+std::string *Stripper::AllocString()
 {
     if (m_StringCache.empty())
     {
-        return new SourceHook::String();
+        return new std::string();
     } else {
-        SourceHook::String *str = m_StringCache.front();
+        std::string *str = m_StringCache.top();
         m_StringCache.pop();
         return str;
     }
 }
 
-void Stripper::FreeString(SourceHook::String *str)
+void Stripper::FreeString(std::string *str)
 {
     m_StringCache.push(str);
 }
@@ -129,7 +213,7 @@ ent_prop *Stripper::AllocProp()
     {
         return new ent_prop;
     } else {
-        ent_prop *p = m_PropCache.front();
+        ent_prop *p = m_PropCache.top();
 #if defined _DEBUG
         assert(p->marked == false);
         p->marked = true;
@@ -151,7 +235,7 @@ void Stripper::FreeProp(ent_prop *prop)
 void Stripper::SetEntityList(const char *ents)
 {
     Clear();
-    
+
     m_resync = false;
     AppendToString(ents, strlen(ents));
 
@@ -177,7 +261,7 @@ void Stripper::SetEntityList(const char *ents)
             /* copy this line */
             f_strncpy_s(_tmp, &(ents[pos]), i-pos+1);
             /* make a new string out of it */
-            String *pstr = AllocString();
+            std::string *pstr = AllocString();
             pstr->assign(_tmp);
             /* push it into the lines table */
             m_lines.push_back(pstr);
@@ -198,27 +282,25 @@ void Stripper::SetEntityList(const char *ents)
         /* copy */
         f_strncpy_s(_tmp, &(ents[pos]), len-pos+1);
         /* new string */
-        String *pstr = AllocString();
+        std::string *pstr = AllocString();
         pstr->assign(_tmp);
         /* push it into the lines table */
         m_lines.push_back(pstr);
     }
     /* delete temporary string */
     delete [] _tmp;
-    
+
     /* build the real props list */
     _BuildPropList();
 }
 
 bool EntPropsMatch(parse_pair *p, ent_prop *e, int *ovector)
 {
-    int rc;
     if (stricmp(p->key.c_str(), e->key.c_str()) == 0)
     {
         if (p->re)
         {
-            rc = pcre_exec(p->re, NULL, e->val.c_str(), e->val.size(), 0, 0, ovector, 30);
-            if (rc >= 0)
+            if (MatchRegex(p->re, p->match_data, e->val.c_str(), e->val.size(), ovector))
             {
                 return true;
             }
@@ -233,9 +315,9 @@ bool EntPropsMatch(parse_pair *p, ent_prop *e, int *ovector)
     return false;
 }
 
-void ListRecycle(SourceHook::List<parse_pair *> &toread, SourceHook::List<parse_pair *> &towrite)
+void ListRecycle(std::list<parse_pair *> &toread, std::list<parse_pair *> &towrite)
 {
-    SourceHook::List<parse_pair *>::iterator iter;
+    std::list<parse_pair *>::iterator iter;
     for (iter=toread.begin(); iter!=toread.end(); iter++)
     {
         towrite.push_back((*iter));
@@ -243,12 +325,12 @@ void ListRecycle(SourceHook::List<parse_pair *> &toread, SourceHook::List<parse_
     toread.clear();
 }
 
-void Stripper::RunReplaceFilter(replace_prop &replace, SourceHook::List<parse_pair *> &props)
+void Stripper::RunReplaceFilter(replace_prop &replace, std::list<parse_pair *> &props)
 {
-    List<List<ent_prop *> *>::iterator ent_iter;
-    List<ent_prop *>::iterator prop_iter;
-    List<parse_pair *>::iterator parse_iter;
-    List<ent_prop *> *proplist;
+    std::list<std::list<ent_prop *> *>::iterator ent_iter;
+    std::list<ent_prop *>::iterator prop_iter;
+    std::list<parse_pair *>::iterator parse_iter;
+    std::list<ent_prop *> *proplist;
     ent_prop *e;
     parse_pair *p;
     size_t num_match = 0;
@@ -360,12 +442,12 @@ void Stripper::RunReplaceFilter(replace_prop &replace, SourceHook::List<parse_pa
     ListRecycle(replace.to_replace, props);
 }
 
-void Stripper::RunRemoveFilter(SourceHook::List<parse_pair *> &filters)
+void Stripper::RunRemoveFilter(std::list<parse_pair *> &filters)
 {
-    List<List<ent_prop *> *>::iterator proplist_iter;
-    List<ent_prop *> *proplist;
-    List<ent_prop *>::iterator ent_iter;
-    List<parse_pair *>::iterator pair_iter, pair_iter_begin, pair_iter_end;
+    std::list<std::list<ent_prop *> *>::iterator proplist_iter;
+    std::list<ent_prop *> *proplist;
+    std::list<ent_prop *>::iterator ent_iter;
+    std::list<parse_pair *>::iterator pair_iter, pair_iter_begin, pair_iter_end;
     parse_pair *p;
     ent_prop *e;
 
@@ -422,12 +504,12 @@ void Stripper::RunRemoveFilter(SourceHook::List<parse_pair *> &filters)
     }
 }
 
-void Stripper::RunAddFilter(SourceHook::List<parse_pair *> &list)
+void Stripper::RunAddFilter(std::list<parse_pair *> &list)
 {
-    List<parse_pair *>::iterator iter, end=list.end();
+    std::list<parse_pair *>::iterator iter, end=list.end();
     iter=list.begin();
 
-    List<ent_prop *> *cl = new List<ent_prop *>();
+    std::list<ent_prop *> *cl = new std::list<ent_prop *>();
     ent_prop *e;
     while (iter != end)
     {
@@ -452,9 +534,9 @@ void Stripper::_BuildPropList()
     size_t _valsize = 0;
 
     bool in_block = false;
-    List<String *>::iterator iter, end=m_lines.end();
-    String *s;
-    List<ent_prop *> *cl = NULL;
+    std::list<std::string *>::iterator iter, end=m_lines.end();
+    std::string *s;
+    std::list<ent_prop *> *cl = NULL;
     for (iter=m_lines.begin(); iter!=end; iter++)
     {
         s = (*iter);
@@ -464,7 +546,7 @@ void Stripper::_BuildPropList()
             in_block = true;
             if (!cl)
             {
-                cl = new List<ent_prop *>();
+                cl = new std::list<ent_prop *>();
             }
         } else if (*(s->c_str()) == '}' && in_block) {
             /* if we reached a '}' ane we're in a block, end the old block
@@ -476,12 +558,15 @@ void Stripper::_BuildPropList()
             if (*(s->c_str() + 1) == '{')
             {
                 in_block = true;
-                cl = new List<ent_prop *>();
+                cl = new std::list<ent_prop *>();
             }
         } else {
             /* try to match our precompiled expression for "..." "..." */
-            int rc = pcre_exec(brk_re, brk_re_extra, s->c_str(), s->size(), 0, 0, ovector, 30);
-            if (rc >= 3)
+            if (!stripper_game.should_disable_jit())
+            {
+                JITCompile();
+            }
+            if (MatchRegex(brk_re, brk_match_data, s->c_str(), s->size(), ovector))
             {
                 size_t l = ovector[3] - ovector[2];
                 if (l > _keysize)
@@ -554,14 +639,12 @@ void Stripper::ApplyFileFilter(const char *file)
     };
 
     bool in_block = false;
-    List<parse_pair *> props;
-    CStack<parse_pair *> fpairs;
+    std::list<parse_pair *> props;
+    std::stack<parse_pair *> fpairs;
     Mode mode = Mode_Filter;
     SubMode submode = SubMode_None;
-    const char *error = NULL;
-    int err_offs = -1;
     int line = 0;
-    List<parse_pair *>::iterator iter, end;
+    std::list<parse_pair *>::iterator iter, end;
     replace_prop replace;
     while (!feof(fp))
     {
@@ -596,7 +679,7 @@ void Stripper::ApplyFileFilter(const char *file)
         } else if (!strncmp(buffer, "insert:", 7) && (mode == Mode_Replace)) {
             submode = SubMode_Insert;
         } else if (strcmp(buffer, "{")==0 && !in_block) {
-            /* if we reach a new block and we're not in a block, 
+            /* if we reach a new block and we're not in a block,
              * dump the current props table and reset.
              */
             if (mode != Mode_Replace || (mode == Mode_Replace && submode != SubMode_None))
@@ -605,11 +688,11 @@ void Stripper::ApplyFileFilter(const char *file)
                 props.clear();
             }
         } else if (strncmp(buffer, "}", 1) == 0 && in_block) {
-            /* if we reach the end of a block and we're in a block, 
+            /* if we reach the end of a block and we're in a block,
              * mark the end and flush what we've done
              */
             in_block = false;
-            
+
             if (mode == Mode_Replace)
             {
                 assert(submode != SubMode_None);
@@ -652,8 +735,8 @@ void Stripper::ApplyFileFilter(const char *file)
                 } else if (mode == Mode_Add) {
                     RunAddFilter(props);
                 }
-    
-                /* push each of the unused filters 
+
+                /* push each of the unused filters
                 * and then clear the property list
                 */
                 end = props.end();
@@ -675,8 +758,11 @@ void Stripper::ApplyFileFilter(const char *file)
         } else if (in_block) {
             /* attempt to run our precompiled property match expression */
             len = strlen(buffer);
-            int rc = pcre_exec(brk_re, brk_re_extra, buffer, len, 0, 0, ovector, 30);
-            if (rc >= 3)
+            if (!stripper_game.should_disable_jit())
+            {
+                JITCompile();
+            }
+            if (MatchRegex(brk_re, brk_match_data, buffer, len, ovector))
             {
                 size_t len = ovector[3] - ovector[2];
                 if (len > _keysize)
@@ -696,15 +782,52 @@ void Stripper::ApplyFileFilter(const char *file)
                 }
                 /* copy the value */
                 f_strncpy_s(_val, buffer + ovector[4], len);
-                pcre *re = NULL;
+                pcre2_code *re = NULL;
+                pcre2_match_data *match_data = NULL;
                 if (_val[0] == '/' && _val[len-1] == '/')
                 {
                     _val[--len] = '\0';
-                    re = pcre_compile(&(_val[1]), PCRE_CASELESS, &error, &err_offs, NULL);
+                    int error_code;
+                    PCRE2_SIZE error_offset;
+                    re = pcre2_compile((PCRE2_SPTR)&(_val[1]),
+                                       PCRE2_ZERO_TERMINATED,
+                                       PCRE2_CASELESS,
+                                       &error_code,
+                                       &error_offset,
+                                       NULL);
                     if (!re)
                     {
+                        char error[256];
+                        int error_length = pcre2_get_error_message(error_code,
+                                                                   (PCRE2_UCHAR *)error,
+                                                                   sizeof(error));
+                        if (error_length < 0)
+                        {
+                            strcpy(error, "unknown PCRE2 error");
+                        }
                         stripper_game.log_message("File %s parse error (line %d):", file, line);
-                        stripper_game.log_message("Expression(%s): At pos %d, %s", _val, err_offs, error);
+                        stripper_game.log_message("Expression(%s): At pos %d, %s", _val, (int)error_offset, error);
+                        continue;
+                    }
+                    if (!stripper_game.should_disable_jit() && pcre2_jit_compile(NULL, PCRE2_JIT_TEST_ALLOC) == 0)
+                    {
+                        int jit_error = pcre2_jit_compile(re, PCRE2_JIT_COMPLETE);
+                        if (jit_error != 0)
+                        {
+                            char jit_error_msg[256];
+                            if (pcre2_get_error_message(jit_error, (PCRE2_UCHAR8 *)jit_error_msg, sizeof(jit_error_msg)) < 0)
+                            {
+                                snprintf(jit_error_msg, sizeof(jit_error_msg), "Unknown PCRE JIT error");
+                            }
+                            stripper_game.log_message("Cannot request JIT compilation from PCRE, error: %s", jit_error_msg);
+                        }
+                    }
+                    match_data = pcre2_match_data_create_from_pattern(re, NULL);
+                    if (!match_data)
+                    {
+                        pcre2_code_free(re);
+                        stripper_game.log_message("File %s parse error (line %d):", file, line);
+                        stripper_game.log_message("Expression(%s): Unable to allocate PCRE2 match data", _val);
                         continue;
                     }
                 }
@@ -714,10 +837,14 @@ void Stripper::ApplyFileFilter(const char *file)
                 {
                     p = new parse_pair;
                 } else {
-                    p = fpairs.front();
+                    p = fpairs.top();
+                    if (p->match_data)
+                    {
+                        pcre2_match_data_free(p->match_data);
+                    }
                     if (p->re)
                     {
-                        pcre_free(p->re);
+                        pcre2_code_free(p->re);
                     }
                     fpairs.pop();
                 }
@@ -725,6 +852,7 @@ void Stripper::ApplyFileFilter(const char *file)
                 p->key.assign(_key);
                 p->val.assign(_val);
                 p->re = re;
+                p->match_data = match_data;
                 props.push_back(p);
             }
         }
@@ -741,10 +869,14 @@ void Stripper::ApplyFileFilter(const char *file)
     parse_pair *k = NULL;
     while (!fpairs.empty())
     {
-        k = fpairs.front();
+        k = fpairs.top();
+        if (k->match_data)
+        {
+            pcre2_match_data_free(k->match_data);
+        }
         if (k->re)
         {
-            pcre_free(k->re);
+            pcre2_code_free(k->re);
         }
         delete k;
         fpairs.pop();
@@ -766,8 +898,8 @@ const char *Stripper::ToString()
         m_tostring[0] = '\0';
     m_tostring_len = 0;
 
-    List<List<ent_prop *> *>::iterator iter, end=m_props.end(), begin=m_props.begin();
-    List<ent_prop *>::iterator eiter, eend;
+    std::list<std::list<ent_prop *> *>::iterator iter, end=m_props.end(), begin=m_props.begin();
+    std::list<ent_prop *>::iterator eiter, eend;
     bool first = true;
 
     for (iter=m_props.begin(); iter!=end; iter++)
@@ -798,7 +930,7 @@ const char *Stripper::ToString()
 
 void Stripper::Clear()
 {
-    List<String *>::iterator lines_iter;
+    std::list<std::string *>::iterator lines_iter;
 
     lines_iter = m_lines.begin();
     while (lines_iter != m_lines.end())
@@ -808,8 +940,8 @@ void Stripper::Clear()
     }
     m_lines.clear();
 
-    List<ent_prop *>::iterator iter2, end2;
-    List<List<ent_prop *> *>::iterator iter3, end3;
+    std::list<ent_prop *>::iterator iter2, end2;
+    std::list<std::list<ent_prop *> *>::iterator iter3, end3;
 
     iter3 = m_props.begin();
     end3 = m_props.end();
@@ -849,4 +981,3 @@ void Stripper::AppendToString(const char* buf, size_t len)
     m_tostring_len += len;
     m_tostring[m_tostring_len] = '\0';
 }
-
