@@ -1,5 +1,5 @@
 /** vim: set ts=4 sw=4 et tw=99:
- * 
+ *
  * === Stripper for Metamod:Source ===
  * Copyright (C) 2005-2009 David "BAILOPAN" Anderson
  * No warranties of any kind.
@@ -12,12 +12,10 @@
 #define _INCLUDE_SAMPLEPLUGIN_H
 
 #include <ISmmPlugin.h>
-#include <sh_string.h>
-#include <sh_list.h>
-#include <sh_stack.h>
+#include <string>
 
-class StripperPlugin : 
-    public ISmmPlugin, 
+class StripperPlugin :
+    public ISmmPlugin,
     public IConCommandBaseAccessor
 {
 public:
@@ -56,9 +54,13 @@ PLUGIN_GLOBALVARS();
         return false; \
     }
 
-
+#if METAMOD_PLAPI_VERSION < 18
 const char *GetMapEntitiesString_handler();
 bool LevelInit_handler(char const *pMapName, char const *pMapEntities, char const *c, char const *d, bool e, bool f);
+#else
+KHook::Return<const char *> GetMapEntitiesString_handler(IVEngineServer *pEngine);
+KHook::Return<bool> LevelInit_handler(IServerGameDLL *pServer, char const *pMapName, char const *pMapEntities, char const *c, char const *d, bool e, bool f);
+#endif
 char *UTIL_ToLowerCase(const char *str);
 
 #endif //_INCLUDE_SAMPLEPLUGIN_H

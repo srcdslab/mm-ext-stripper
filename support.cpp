@@ -10,6 +10,10 @@
  */
 #include <new>
 #include <stdio.h>
+#include <string.h>
+#if !defined(_WIN32)
+#include <strings.h>
+#endif
 #include "support.h"
 #include "parser.h"
 #if defined WIN32
@@ -128,17 +132,8 @@ command_dump()
 	int num = 0;
 	char file[255];
 
-	char* szMapName = (char*)stripper_game.get_map_name();
-
-	//Clean the mapname
-	for (int i = strlen(szMapName); i >= 0; i--)
-	{
-		if (szMapName[i] == '\\' || szMapName[i] == '/')
-		{
-			szMapName += (i + 1);
-			break;
-		}
-	}
+	char szMapName[128];
+	stripper_game.get_map_name(szMapName, sizeof(szMapName));
 
 	do
 	{

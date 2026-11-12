@@ -1,5 +1,5 @@
 /** vim: set ts=4 sw=4 et tw=99:
- * 
+ *
  * === Stripper for Metamod:Source ===
  * Copyright (C) 2005-2009 David "BAILOPAN" Anderson
  * No warranties of any kind.
@@ -11,10 +11,10 @@
 #ifndef _INCLUDE_STRIP_PARSER_H
 #define _INCLUDE_STRIP_PARSER_H
 
-#include <sh_string.h>
-#include <sh_list.h>
-#include <sh_stack.h>
-#include "pcre.h"
+#include <string>
+#include <list>
+#include <stack>
+#include "pcre2.h"
 
 struct CACHEABLE
 {
@@ -28,23 +28,26 @@ struct CACHEABLE
 
 struct parse_pair
 {
-    SourceHook::String key;
-    SourceHook::String val;
-    pcre *re;
+    parse_pair() : re(NULL), match_data(NULL) { }
+
+    std::string key;
+    std::string val;
+    pcre2_code *re;
+    pcre2_match_data *match_data;
 };
 
 struct ent_prop : public CACHEABLE
 {
-    SourceHook::String key;
-    SourceHook::String val;
+    std::string key;
+    std::string val;
 };
 
 struct replace_prop
 {
-    SourceHook::List<parse_pair *> match;
-    SourceHook::List<parse_pair *> to_replace;
-    SourceHook::List<parse_pair *> to_remove;
-    SourceHook::List<parse_pair *> to_insert;
+    std::list<parse_pair *> match;
+    std::list<parse_pair *> to_replace;
+    std::list<parse_pair *> to_remove;
+    std::list<parse_pair *> to_insert;
 };
 
 class Stripper
@@ -57,30 +60,31 @@ public:
     void ApplyFileFilter(const char *file);
     const char *ToString();
 private:
-    void RunRemoveFilter(SourceHook::List<parse_pair *> &filters);
-    void RunAddFilter(SourceHook::List<parse_pair *> &list);
-    void RunReplaceFilter(replace_prop &replace, SourceHook::List<parse_pair *> &props);
+    void RunRemoveFilter(std::list<parse_pair *> &filters);
+    void RunAddFilter(std::list<parse_pair *> &list);
+    void RunReplaceFilter(replace_prop &replace, std::list<parse_pair *> &props);
     void Clear();
     void _BuildPropList();
 private:
-    SourceHook::String *AllocString();
-    void FreeString(SourceHook::String *str);
+    bool JITCompile();
+    std::string *AllocString();
+    void FreeString(std::string *str);
     ent_prop *AllocProp();
     void FreeProp(ent_prop *prop);
 private:
-    SourceHook::CStack<SourceHook::String *> m_StringCache;
-    SourceHook::CStack<ent_prop *> m_PropCache;
+    std::stack<std::string *> m_StringCache;
+    std::stack<ent_prop *> m_PropCache;
     void AppendToString(const char* buf, size_t len);
 private:
     char* m_tostring;
     size_t m_tostring_len;
     size_t m_tostring_maxlen;
-    SourceHook::List<SourceHook::List<ent_prop *> *> m_props;
-    SourceHook::List<SourceHook::String *> m_lines;
+    std::list<std::list<ent_prop *> *> m_props;
+    std::list<std::string *> m_lines;
     bool m_resync;
-    pcre *brk_re;
-    pcre_extra *brk_re_extra;
+    bool jit_compiled;
+    pcre2_code *brk_re;
+    pcre2_match_data *brk_match_data;
 };
 
 #endif /* _INCLUDE_STRIP_PARSER_H */
-
